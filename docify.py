@@ -6,12 +6,15 @@ import functools
 import importlib
 import inspect
 import logging
+import multiprocessing
 import os
 import shutil
 import sys
 import textwrap
 import warnings
 from argparse import ArgumentParser
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from logging.handlers import QueueHandler, QueueListener
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from types import ModuleType
@@ -48,13 +51,6 @@ def getattr_safe(o: object, name: str, default=_default_sentinel) -> Any:
         if default is _default_sentinel:
             raise AttributeError
         return default
-
-
-def queue_iter(queue):
-    if tqdm is not None:
-        return tqdm(queue, dynamic_ncols=True)
-    else:
-        return queue
 
 
 def get_obj(mod: ModuleType, qualname: str) -> tuple[object, object] | None:
@@ -350,6 +346,7 @@ class UnreachableProvider(meta.BatchableMetadataProvider[Literal[True]]):
 
 # TODO: somehow add module attribute docstrings? e.g. typing.Union
 # TODO: infer for renamed classes, e.g. types._Cell is CellType at runtime, and CellType = _Cell exists in stub
+# TODO: shutil.rmtree
 
 
 class Transformer(cst.CSTTransformer):
@@ -533,6 +530,94 @@ class Transformer(cst.CSTTransformer):
         return updated_node.with_changes(body=node_body)
 
 
+def run_one(
+    input: tuple[str, Path, Path],
+    *,
+    if_needed: bool = False,
+    in_place: bool = True,
+    output_dir: str = "",
+):
+    import_path, file_path, file_relpath = input
+
+    with warnings.catch_warnings():
+        # ignore all warnings, mostly get DeprecationWarnings and a few SyntaxWarnings
+        warnings.simplefilter("ignore")
+
+        try:
+            mod = importlib.import_module(import_path)
+        except ImportError as e:
+            logger.warning(f"could not import {import_path}: {e}")
+            return
+        except Exception:
+            logger.warning(f"could not import {import_path}", exc_info=True)
+            return
+
+        with open(file_path, "r", encoding="utf-8") as f:
+            stub_source = f.read()
+
+        try:
+            stub_cst = cst.parse_module(stub_source)
+        except Exception:
+            logger.exception(f"could not parse {file_path}")
+            return
+
+        logger.info(f"processing {file_path}")
+
+        wrapper = cst.MetadataWrapper(stub_cst)
+        visitor = Transformer(import_path, mod, if_needed)
+
+        new_stub_cst = wrapper.visit(visitor)
+
+        if in_place:
+            f = None
+            try:
+                with NamedTemporaryFile(
+                    dir=(file_path / "..").resolve(),
+                    prefix=f"{file_path.name}.",
+                    mode="w",
+                    delete=False,
+                    encoding="utf-8",
+                ) as f:
+                    f.write(new_stub_cst.code)
+            except:
+                if f:
+                    os.remove(f.name)
+                raise
+
+            shutil.copystat(file_path, f.name)
+            os.replace(f.name, file_path)
+        else:
+            output_path = Path(output_dir)
+            output_file = output_path / file_relpath
+            os.makedirs(output_file.parent, exist_ok=True)
+
+            with open(output_file, "w", encoding="utf-8") as f:
+                f.write(new_stub_cst.code)
+
+
+class BlockingQueueHandler(QueueHandler):
+    def enqueue(self, record) -> None:
+        cast(multiprocessing.Queue, self.queue).put(record)
+
+
+class ForwardingHandler(logging.Handler):
+    def emit(self, record):
+        logger = logging.getLogger(record.name)
+        if logger.isEnabledFor(record.levelno):
+            logger.handle(record)
+
+
+def _worker_init(queue: multiprocessing.Queue):
+    root_logger = logging.root
+
+    for h in root_logger.handlers.copy():
+        h.close()
+        root_logger.removeHandler(h)
+
+    root_logger.addHandler(BlockingQueueHandler(queue))
+    root_logger.setLevel(logging.NOTSET)
+
+
 def run(
     *,
     input_dirs: list[str] | None = None,
@@ -541,7 +626,17 @@ def run(
     if_needed: bool = False,
     in_place: bool = True,
     output_dir: str = "",
+    workers: int = 1,
 ):
+    """
+    Run docify, with the arguments having the same meaning as for the command-line program.
+
+    Log messages are sent through the logging module.
+
+    NOTE: workers defaults to 1 here to avoid using multiprocessing, which can cause problems
+    especially if you're using threads.
+    """
+
     queue: list[tuple[str, Path, Path]] = []
 
     if input_dirs is None:
@@ -590,61 +685,52 @@ def run(
 
                 queue.append((import_path, file_path, file_relpath))
 
-    with warnings.catch_warnings():
-        # ignore all warnings, mostly get DeprecationWarnings and a few SyntaxWarnings
-        warnings.simplefilter("ignore")
+    if workers == 1:
+        it = queue
+        if tqdm is not None:
+            it = tqdm(it, total=len(queue), dynamic_ncols=True, miniters=1)
+        for input in it:
+            run_one(
+                input,
+                if_needed=if_needed,
+                in_place=in_place,
+                output_dir=output_dir,
+            )
+    else:
+        # we need to do some hackery with logging to forward it to the main process
+        # if subprocesses print their own messages then it breaks the progress bar
 
-        for import_path, file_path, file_relpath in queue_iter(queue):
-            try:
-                mod = importlib.import_module(import_path)
-            except ImportError as e:
-                logger.warning(f"could not import {import_path}: {e}")
-                continue
-            except Exception:
-                logger.warning(f"could not import {import_path}", exc_info=True)
-                continue
+        log_queue = multiprocessing.Queue(maxsize=1)
 
-            with open(file_path, "r", encoding="utf-8") as f:
-                stub_source = f.read()
+        listener = QueueListener(log_queue, ForwardingHandler())
+        listener.start()
 
-            try:
-                stub_cst = cst.parse_module(stub_source)
-            except Exception:
-                logger.exception(f"could not parse {file_path}")
-                continue
+        if workers < 1:
+            max_workers = None
+        else:
+            max_workers = workers
+        with ProcessPoolExecutor(
+            max_workers=max_workers,
+            initializer=_worker_init,
+            initargs=(log_queue,),
+        ) as executor:
+            futures = [
+                executor.submit(
+                    run_one,
+                    input,
+                    if_needed=if_needed,
+                    in_place=in_place,
+                    output_dir=output_dir,
+                )
+                for input in queue
+            ]
+            it = as_completed(futures)
+            if tqdm is not None:
+                it = tqdm(it, total=len(queue), dynamic_ncols=True, miniters=1)
+            for _ in it:
+                pass
 
-            logger.info(f"processing {file_path}")
-
-            wrapper = cst.MetadataWrapper(stub_cst)
-            visitor = Transformer(import_path, mod, if_needed)
-
-            new_stub_cst = wrapper.visit(visitor)
-
-            if in_place:
-                f = None
-                try:
-                    with NamedTemporaryFile(
-                        dir=(file_path / "..").resolve(),
-                        prefix=f"{file_path.name}.",
-                        mode="w",
-                        delete=False,
-                        encoding="utf-8",
-                    ) as f:
-                        f.write(new_stub_cst.code)
-                except:
-                    if f:
-                        os.remove(f.name)
-                    raise
-
-                shutil.copystat(file_path, f.name)
-                os.replace(f.name, file_path)
-            else:
-                output_path = Path(output_dir)
-                output_file = output_path / file_relpath
-                os.makedirs(output_file.parent, exist_ok=True)
-
-                with open(output_file, "w", encoding="utf-8") as f:
-                    f.write(new_stub_cst.code)
+        listener.stop()
 
 
 def main(args: Sequence[str] | None = None):
@@ -682,6 +768,12 @@ def main(args: Sequence[str] | None = None):
         "--if-needed",
         action="store_true",
         help="only add a docstring if the object's source code cannot be found",
+    )
+    arg_parser.add_argument(
+        "--workers",
+        type=int,
+        default=0,
+        help="set the number of worker processes to use. Use 1 to disable multiple processes, and 0 to auto-detect using the number of processors (default)",
     )
     arg_parser.add_argument(
         "input_dirs",

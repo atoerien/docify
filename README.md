@@ -65,6 +65,7 @@ options:
   -q, --quiet           decrease verbosity
   -b, --builtins-only   only add docstrings to modules found in `sys.builtin_module_names`
   --if-needed           only add a docstring if the object's source code cannot be found
+  --workers WORKERS     set the number of worker processes to use. Use 1 to disable multiple processes, and 0 to auto-detect using the number of processors (default)
   -i, --in-place        modify stubs in-place
   -o, --output OUTPUT_DIR
                         directory to write modified stubs to
