@@ -7,7 +7,7 @@ dependencies = [
 ]
 requires-python = ">= 3.8"
 authors = [
-    { name = "AThePeanut4", email = "andre.toerien8@gmail.com" },
+    { name = "Andre Toerien", email = "andre.toerien8@gmail.com" },
 ]
 description = "A script to add docstrings to Python type stubs using reflection"
 readme = "README.md"
@@ -28,7 +28,7 @@ classifiers = [
 ]
 
 [project.urls]
-Repository = "https://github.com/AThePeanut4/docify"
+Repository = "https://github.com/atoerien/docify"
 
 [project.scripts]
 docify = "docify:main"
