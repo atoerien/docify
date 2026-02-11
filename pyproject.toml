@@ -1,6 +1,5 @@
 [project]
 name = "docify"
-version = "1.1.0"
 dependencies = [
     "libcst >= 1.1.0",
     "tqdm >= 4.66.4",
@@ -9,6 +8,7 @@ requires-python = ">= 3.8"
 authors = [
     { name = "Andre Toerien", email = "andre.toerien8@gmail.com" },
 ]
+dynamic = ["version"]
 description = "A script to add docstrings to Python type stubs using reflection"
 readme = "README.md"
 license = { text = "MIT" }
@@ -37,3 +37,6 @@ docify = "docify:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "docify.py"

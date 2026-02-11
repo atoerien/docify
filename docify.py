@@ -24,6 +24,8 @@ import libcst as cst
 import libcst.matchers as m
 import libcst.metadata as meta
 
+__version__ = "1.2.0"
+
 tqdm = None
 
 IGNORE_MODULES = ("antigravity", "this")
@@ -742,7 +744,7 @@ def main(args: Sequence[str] | None = None):
         "-V",
         "--version",
         action="version",
-        version="%(prog)s 1.1.0",
+        version=f"%(prog)s {__version__}",
     )
     arg_parser.add_argument(
         "-v",
