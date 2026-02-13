@@ -729,8 +729,8 @@ def run(
             it = as_completed(futures)
             if tqdm is not None:
                 it = tqdm(it, total=len(queue), dynamic_ncols=True, miniters=1)
-            for _ in it:
-                pass
+            for fut in it:
+                fut.result()
 
         listener.stop()
 
