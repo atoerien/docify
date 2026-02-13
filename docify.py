@@ -622,8 +622,8 @@ def _worker_init(queue: multiprocessing.Queue):
 
 def run(
     *,
-    input_dirs: list[str] | None = None,
-    input_dir: str | None = None,
+    input_dirs: list[str | Path] | None = None,
+    input_dir: str | Path | None = None,
     builtins_only: bool = False,
     if_needed: bool = False,
     in_place: bool = True,
