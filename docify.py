@@ -24,7 +24,7 @@ import libcst as cst
 import libcst.matchers as m
 import libcst.metadata as meta
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 
 tqdm = None
 
